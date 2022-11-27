@@ -1,157 +1,221 @@
-import {
-  HttpException,
-  HttpStatus,
-  Injectable,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { HttpStatus, Inject, Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { UserService } from '../user/user.service';
 import * as bcrypt from 'bcryptjs';
 import { User as UserModel } from 'prisma';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
-
-export const CREATED = 1;
-export const EXISTED = 2;
+import {
+  AccountVerificationRequestDTO,
+  LogDTO,
+  LoginRequestDTO,
+  RegisterRequestDTO,
+  ResponseDTO,
+  ValidateRequestDTO,
+} from './auth.dto';
+import { ClientProxy } from '@nestjs/microservices';
+import { MailerService } from './mailer.service';
 
 @Injectable()
 export class AuthService {
   constructor(
+    @Inject('LOGGER_SERVICE') private loggerClient: ClientProxy,
+    private mailerService: MailerService,
     private usersService: UserService,
-    private jwt: JwtService,
+    private jwtService: JwtService,
     private prisma: PrismaService,
   ) {}
 
-  public async createSocialUser(data: Prisma.UserCreateInput) {
-    let user = await this.usersService.findOne({ email: data.email });
-    let status = EXISTED;
-    if (!user) {
-      user = await this.usersService.createSocialUser(data);
-      status = CREATED;
-    }
-    return { user: user, status: status };
-  }
-
-  public async createUser(data: Prisma.UserCreateInput) {
-    data.password = this.encodePassword(data.password);
+  public async register({
+    password,
+    ...rest
+  }: RegisterRequestDTO): Promise<ResponseDTO> {
+    const encryptedPassword = await this.encodePassword(password);
     try {
-      const user = await this.usersService.createUser(data);
-      //await this.mailService.sendUserConfirmation(user);
-      return user;
+      const code = Math.floor(100000 + Math.random() * 999999).toString();
+      const user = await this.prisma.user.create({
+        data: {
+          email: rest.email,
+          username: rest.username,
+          verificationCode: code,
+          password: encryptedPassword,
+          terms: true,
+        },
+      });
+      await this.mailerService.sendVerificationMail(user);
+      await this.sendLog({
+        name: 'User registered',
+        description: `$The user : '${user.username}' with id '${user.id}' `,
+        type: 'INFO',
+      });
+      return { status: HttpStatus.OK, error: null };
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError) {
-        throw new HttpException(
-          'Username or email already exist.',
-          HttpStatus.CONFLICT,
-        );
+        await this.sendLog({
+          name: 'Registration',
+          description: `Prisma error code: ${e.code}`,
+          type: 'ERROR',
+        });
+        return {
+          status: HttpStatus.CONFLICT,
+          error: ['Username or Email already exist'],
+        };
       }
-      throw new HttpException('Problem with mailer', HttpStatus.BAD_GATEWAY);
     }
   }
 
-  public async login(
-    body: { email: string; password: string },
-    ip: string,
-  ): Promise<any> {
-    const { email, password } = body;
-    const user: UserModel = await this.usersService.findOne({ email });
+  public async login({
+    email,
+    password,
+  }: LoginRequestDTO): Promise<ResponseDTO> {
+    const user = await this.prisma.user.findUnique({ where: { email: email } });
     if (!user) {
-      throw new HttpException('No user found', HttpStatus.UNAUTHORIZED);
+      return {
+        status: HttpStatus.CONFLICT,
+        error: ['Invalid email or password'],
+        userId: null,
+      };
     }
-    const isPasswordValid: boolean = this.isPasswordValid(
+
+    const isPasswordValid: boolean = await this.isPasswordValid(
       password,
       user.password,
     );
+
     if (!isPasswordValid) {
-      throw new HttpException('Invalid password', HttpStatus.UNAUTHORIZED);
+      return {
+        status: HttpStatus.CONFLICT,
+        error: ['Invalid email or password'],
+      };
     }
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: {
-        lastLoginAt: new Date(),
-        ...(!user.IPsLogged.includes(ip) && {
-          IPsLogged: {
-            push: ip,
-          },
-        }),
+
+    if (!user.verified) {
+      return {
+        status: HttpStatus.FORBIDDEN,
+        error: ['This account is not verified'],
+        user: { email: user.email, username: user.username, verified: false },
+      };
+    }
+
+    const token: string = await this.generateToken(user);
+
+    return { status: HttpStatus.OK, error: null, token };
+  }
+
+  private async generateToken(user: UserModel) {
+    return this.jwtService.sign({
+      id: user.id,
+      email: user.email,
+      username: user.username,
+    });
+  }
+
+  public async validate({ token }: ValidateRequestDTO): Promise<ResponseDTO> {
+    try {
+      const decodedToken: UserModel = await this.jwtService.verify(token);
+      if (!decodedToken || !decodedToken.id) {
+        return {
+          status: HttpStatus.FORBIDDEN,
+          error: ['Token is invalid'],
+          userId: null,
+        };
+      }
+      const auth: any = await this.findUser({
+        id: decodedToken.id,
+        username: decodedToken.username,
+      });
+      if (!auth) {
+        return {
+          status: HttpStatus.CONFLICT,
+          error: ['User not found'],
+          userId: null,
+        };
+      }
+      console.log('ok');
+      return { status: HttpStatus.OK, error: null, user: decodedToken };
+    } catch (e) {
+      console.log(e);
+      if (e instanceof Prisma.PrismaClientKnownRequestError) {
+        await this.sendLog({
+          name: 'Validate',
+          description: `Prisma error code: ${e.code}`,
+          type: 'ERROR',
+        });
+      }
+      return { status: HttpStatus.BAD_REQUEST, error: [e.code, e.message] };
+    }
+  }
+
+  private async findUser(user: UserModel) {
+    return await this.prisma.user.findFirst({
+      where: {
+        ...user,
       },
     });
-    const jwt = this.generateToken(user.id);
-    user.password = undefined;
-    user.verificationCode = undefined;
-    return { jwt: jwt, user: user };
   }
 
-  public async verificationCode(email: string, code: string) {
-    const user = await this.usersService.findOne({ email });
-
-    if (!user) return { error: true, message: 'email not exist in database' };
-    if (user.verified) return { error: true, message: 'User already verified' };
-    if (user.verificationCode !== code)
-      return { error: true, message: 'Invalid code' };
-    await this.usersService.updateUser({
-      where: { id: user.id },
-      data: { verified: true },
-    });
-    return { error: false, message: 'User has been verified' };
+  async isPasswordValid(
+    password: string,
+    userPassword: string,
+  ): Promise<boolean> {
+    return bcrypt.compare(password, userPassword);
   }
-
-  public async refresh(user: UserModel): Promise<string> {
-    //this.repository.update(user.id, { lastLoginAt: new Date() });
-
-    return this.generateToken(user);
-  }
-
-  // Decoding the JWT Token
-  public async decode(token: string): Promise<unknown> {
-    return this.jwt.decode(token, null);
-  }
-
-  // Get User by User ID we get from decode()
-  public async validateUser(decoded: any): Promise<UserModel> {
-    return this.usersService.findOne({ id: decoded.id });
-  }
-
-  // Generate JWT Token
-  public generateToken(id: number): string {
-    return this.jwt.sign({ id });
-  }
-
-  // Validate User's password
-  public isPasswordValid(password: string, userPassword: string): boolean {
-    return bcrypt.compareSync(password, userPassword);
-  }
-
   // Encode User's password
-  public encodePassword(password: string): string {
+  async encodePassword(password: string): Promise<string> {
     const salt: string = bcrypt.genSaltSync(10);
 
-    return bcrypt.hashSync(password, salt);
+    return bcrypt.hash(password, salt);
   }
 
-  // Validate JWT Token, throw forbidden error if JWT Token is invalid
-  private async validate(token: string): Promise<boolean | never> {
-    const decoded: unknown = this.jwt.verify(token);
+  async sendLog(log: LogDTO): Promise<void> {
+    return this.loggerClient
+      .emit('LOG_CREATE', { ...log, service: 'AUTH' })
+      .toPromise();
+  }
 
-    if (!decoded) {
-      throw new HttpException('Forbidden', HttpStatus.FORBIDDEN);
-    }
-
-    const user: UserModel = await this.validateUser(decoded);
-
+  async verification(
+    payload: AccountVerificationRequestDTO,
+  ): Promise<ResponseDTO> {
+    const user = await this.prisma.user.findFirst({
+      where: { email: payload.email, verificationCode: payload.code },
+    });
     if (!user) {
-      throw new UnauthorizedException();
+      return { status: HttpStatus.BAD_REQUEST, error: [''] };
+    } else if (user.verified) {
+      return {
+        status: HttpStatus.BAD_REQUEST,
+        error: ['Account already verified'],
+      };
     }
-
-    return true;
+    await this.prisma.user.update({
+      where: { email: payload.email },
+      data: {
+        verified: true,
+      },
+    });
+    return { status: HttpStatus.OK };
   }
 
-  public async sendVerificationCode(email: string) {
-    const user = await this.usersService.findOne({ email });
-
-    if (!user) return { error: true, message: 'User not exist' };
-    if (user.verified) return { error: true, message: 'User already verified' };
-    //await this.mailService.sendUserConfirmation(user);
-    return { error: false, message: 'code send' };
+  async sendAnotherCode(payload: { email: string }) {
+    let user = await this.prisma.user.findUnique({
+      where: { email: payload.email },
+    });
+    if (!user) {
+      return { status: HttpStatus.BAD_REQUEST, error: [''] };
+    } else if (user.verified) {
+      return {
+        status: HttpStatus.BAD_REQUEST,
+        error: ['Account already verified'],
+      };
+    }
+    const code = Math.floor(100000 + Math.random() * 999999).toString();
+    user = await this.prisma.user.update({
+      where: { email: payload.email },
+      data: {
+        verificationCode: code,
+      },
+    });
+    console.log(user);
+    await this.mailerService.sendVerificationMail(user);
   }
 }

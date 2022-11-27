@@ -1,0 +1,36 @@
+//// ------------------------------------------------------
+//// THIS FILE WAS AUTOMATICALLY GENERATED (DO NOT MODIFY)
+//// ------------------------------------------------------
+
+Table User {
+  id Int [pk, increment]
+  email String [unique, not null]
+  username String [unique]
+  password String
+  createdAt DateTime [default: `now()`, not null]
+  updatedAt DateTime [default: `now()`, not null]
+  lastLoginAt DateTime
+  IPsLogged String[] [not null]
+  terms Boolean [not null, default: false]
+  verified Boolean [not null, default: false]
+  verificationCode String [not null, default: '']
+  socialLogin Social
+}
+
+Table RoleRight {
+  id Int [pk, increment]
+  role Roles [not null]
+}
+
+Enum Roles {
+  ADMIN
+  MODERATOR
+  USER
+}
+
+Enum Social {
+  GOOGLE
+  APPLE
+  TWITTER
+  DISCORD
+}
