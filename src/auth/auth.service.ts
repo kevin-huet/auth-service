@@ -51,6 +51,18 @@ export class AuthService {
       return { status: HttpStatus.OK, error: null };
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError) {
+        if (e.code === 'P2002') {
+          await this.sendLog({
+            name: 'Registration',
+            description: `Prisma error code: ${e.code}`,
+            type: 'ERROR',
+          });
+          return {
+            status: HttpStatus.CONFLICT,
+            error: ['Username or Email already exist'],
+          };
+        }
+      } else {
         await this.sendLog({
           name: 'Registration',
           description: `Prisma error code: ${e.code}`,
@@ -58,7 +70,7 @@ export class AuthService {
         });
         return {
           status: HttpStatus.CONFLICT,
-          error: ['Username or Email already exist'],
+          error: ['Unknown error'],
         };
       }
     }
@@ -197,6 +209,7 @@ export class AuthService {
   }
 
   async sendAnotherCode(payload: { email: string }) {
+    console.log(payload);
     let user = await this.prisma.user.findUnique({
       where: { email: payload.email },
     });
@@ -215,7 +228,7 @@ export class AuthService {
         verificationCode: code,
       },
     });
-    console.log(user);
+    console.log('code');
     await this.mailerService.sendVerificationMail(user);
   }
 }

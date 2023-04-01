@@ -14,12 +14,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum Roles {
-    ADMIN
-    MODERATOR
-    USER
-}
-
 enum Social {
   GOOGLE
   APPLE
@@ -31,6 +25,7 @@ model User {
   id                        Int             @default(autoincrement()) @id
   email                     String          @unique
   username                  String?         @unique
+  roles                     Roles[]         @default([USER])
   password                  String?
   createdAt                 DateTime        @default(now())
   updatedAt                 DateTime        @default(now())
@@ -40,9 +35,4 @@ model User {
   verified                  Boolean         @default(false)
   verificationCode          String          @default("")
   socialLogin               Social?
-}
-
-model RoleRight {
-  id                        Int             @default(autoincrement()) @id
-  role                      Roles
 }

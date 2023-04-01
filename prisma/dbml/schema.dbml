@@ -6,6 +6,7 @@ Table User {
   id Int [pk, increment]
   email String [unique, not null]
   username String [unique]
+  roles Roles[] [not null]
   password String
   createdAt DateTime [default: `now()`, not null]
   updatedAt DateTime [default: `now()`, not null]
@@ -17,9 +18,39 @@ Table User {
   socialLogin Social
 }
 
-Table RoleRight {
+Table Right {
   id Int [pk, increment]
-  role Roles [not null]
+  name String [unique, not null]
+  label String [not null]
+  application String [not null]
+  resource String [not null]
+  action String [not null]
+  possession String [not null]
+  usedBy Role [not null]
+
+  indexes {
+    (application, name) [unique]
+    (application, resource, action, possession) [unique]
+  }
+}
+
+Table Role {
+  id Int [pk, increment]
+  name String [unique, not null]
+  label String [not null]
+  inheritedRoles Role [not null]
+  childrenRoles Role [not null]
+  rights Right [not null]
+}
+
+Table rights {
+  usedbyId Int [ref: > Role.id]
+  rightsId Int [ref: > Right.id]
+}
+
+Table roleInheritance {
+  inheritedrolesId Int [ref: > Role.id]
+  childrenrolesId Int [ref: > Role.id]
 }
 
 Enum Roles {
@@ -33,4 +64,12 @@ Enum Social {
   APPLE
   TWITTER
   DISCORD
+}
+
+Enum Action {
+  read
+  manage
+  update
+  delete
+  create
 }

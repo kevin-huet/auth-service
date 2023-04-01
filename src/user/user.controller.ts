@@ -26,7 +26,7 @@ export class UserController {
 
   @MessagePattern('test')
   async test(body, @Ctx() context) {
-    console.log(context.getSubject());
+    console.log('tt');
     return 'oh mince';
   }
 }
